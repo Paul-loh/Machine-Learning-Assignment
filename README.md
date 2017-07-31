@@ -1,2 +1,2 @@
 # Machine-Learning-Assignment
-Markdown file for the Coursera Machine Learning course peer review project 
+Markdown file for the Coursera Practical Machine Learning course peer review project
