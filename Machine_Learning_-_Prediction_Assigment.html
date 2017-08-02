@@ -1338,51 +1338,30 @@ cols &lt;- c('classe', 'pColour', 'magnet_belt_x', 'magnet_belt_y', 'magnet_belt
 ##          C    0   23  625   31    6
 ##          D    3   13   12  597   13
 ##          E    1    0    2    1  666</code></pre>
-</div>
-</div>
-<div id="apply-model-to-final-test-file" class="section level2">
-<h2>Apply Model to Final Test File</h2>
-<div id="load-final-test-data" class="section level3">
-<h3>Load Final Test Data</h3>
-<pre class="r"><code>  tmpdata &lt;- read.csv2(file='./Data/pml-testing.csv', header=TRUE, sep=',', strip.white=TRUE, na.strings='&lt;NA&gt;', stringsAsFactors = FALSE)</code></pre>
-</div>
-<div id="pre-process-final-test-data" class="section level3">
-<h3>Pre-process Final Test Data</h3>
-<p>Take only necessary columns as used in the selected:</p>
-<pre class="r"><code>  testing.final &lt;- tmpdata[, c('problem_id',v.rpy.all,v.magnet.all)]</code></pre>
-<p>Change variables to numeric as before so they are accepted by the model:</p>
-<pre class="r"><code>  excluded &lt;- c(1)
-  for (i in 1:ncol(testing.final)) {if(max(i==excluded) == 0) {testing.final[,i] &lt;- as.numeric(testing.final[,i])}}</code></pre>
-</div>
-<div id="apply-random-forest-model-on-final-test-data" class="section level3">
-<h3>Apply Random Forest Model on Final Test Data</h3>
-<pre class="r"><code>  # Predict
-  rf.v.rpy.magnet.all.prediction.final &lt;- as.data.frame(predict(rf.v.rpy.magnet.all.varfit, newdata=testing.final))
-  # Add prediction to data frame
-  testing.final &lt;- data.frame(testing.final, 'prediction'= rf.v.rpy.magnet.all.prediction.final[,1])
-  # Print predictions
-  testing.final[,c('problem_id','prediction')]</code></pre>
-<pre><code>##    problem_id prediction
-## 1           1          B
-## 2           2          A
-## 3           3          B
-## 4           4          A
-## 5           5          A
-## 6           6          E
-## 7           7          D
-## 8           8          B
-## 9           9          A
-## 10         10          A
-## 11         11          B
-## 12         12          C
-## 13         13          B
-## 14         14          A
-## 15         15          E
-## 16         16          E
-## 17         17          A
-## 18         18          B
-## 19         19          B
-## 20         20          B</code></pre>
+<!-- ## Apply Model to Final Test File -->
+<!-- ### Load Final Test Data -->
+<!-- ```{r Load Test Data, warning=FALSE, echo=TRUE} -->
+<!--   tmpdata <- read.csv2(file='./Data/pml-testing.csv', header=TRUE, sep=',', strip.white=TRUE, na.strings='<NA>', stringsAsFactors = FALSE) -->
+<!-- ``` -->
+<!-- ### Pre-process Final Test Data -->
+<!-- Take only necessary columns as used in the selected: -->
+<!-- ```{r Pre-process Test Data, warning=FALSE, echo=TRUE} -->
+<!--   testing.final <- tmpdata[, c('problem_id',v.rpy.all,v.magnet.all)] -->
+<!-- ``` -->
+<!-- Change variables to numeric as before so they are accepted by the model: -->
+<!-- ```{r Change Data Types Test Data, warning=FALSE} -->
+<!--   excluded <- c(1) -->
+<!--   for (i in 1:ncol(testing.final)) {if(max(i==excluded) == 0) {testing.final[,i] <- as.numeric(testing.final[,i])}} -->
+<!-- ``` -->
+<!-- ### Apply Random Forest Model on Final Test Data -->
+<!-- ```{r RPY and Magnet RF Final Test, warning=FALSE, message=FALSE} -->
+<!--   # Predict -->
+<!--   rf.v.rpy.magnet.all.prediction.final <- as.data.frame(predict(rf.v.rpy.magnet.all.varfit, newdata=testing.final)) -->
+<!--   # Add prediction to data frame -->
+<!--   testing.final <- data.frame(testing.final, 'prediction'= rf.v.rpy.magnet.all.prediction.final[,1]) -->
+<!--   # Print predictions -->
+<!--   testing.final[,c('problem_id','prediction')] -->
+<!-- ``` -->
 </div>
 <div id="stop-the-cluster" class="section level3">
 <h3>Stop the cluster</h3>
