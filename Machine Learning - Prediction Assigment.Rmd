@@ -1,0 +1,916 @@
+---
+title: "Prediction Assignment"
+author: "Paul Loh"
+date: "16 July 2017"
+output:
+  html_document: default
+---
+<style type="text/css">
+body, td {
+   font-size: 14px;
+}
+h1.title {
+  font-size: 32px;
+  color: DarkRed;
+}
+h1 { /* Header 1 */ 
+  font-size: 28px;
+  color: DarkBlue;
+}
+h2 { /* Header 2 */
+    font-size: 24px;
+  color: DarkBlue;
+}
+h3 { /* Header 3 */
+  font-size: 20px;
+  font-family: "Times New Roman", Times, serif;
+  color: DarkBlue;
+}
+h4 { /* Header 4 */
+  font-size: 16px;
+  font-family: "Times New Roman", Times, serif;
+  color: DarkBlue;
+}
+code.r{
+  font-size: 11px;
+}
+pre {
+  font-size: 11px
+}
+div.main-container { 
+  max-width: inherit; 
+} 
+  .column-left{
+    float: left;
+    width: 33%;
+    text-align: left;
+  }
+  .column-center{
+    display: inline-block;
+    width: 33%;
+    text-align: left;
+  }
+  .column-right{
+    float: right;
+    width: 33%;
+    text-align: left;
+  }  
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache = FALSE)
+options(width = 180)
+```
+
+## Problem Definition
+
+From a given data set of sensor information relating to bicep curl excercises investigate what features (variables) and model would be most accurate in predicting whether the same excercise is being preformed correctly with a new set of similar data. The *classe* variable identifies whether the excercise is being performed correctly contains the following values:
+
+* Class A: Exactly according to the specification
+* Class B: Throwing the elbows to the front
+* Class C: Lifting the dumbbell only halfway  
+* Class D: Lowering the dumbbell only halfway
+* Class E: Throwing the hips to the front
+
+Read more: http://groupware.les.inf.puc-rio.br/har#ixzz4mS9ozCkG
+
+## Preparation
+
+```{r Load Libraries, message=FALSE, warning=FALSE}
+  library(doParallel); library(caret); library(ggplot2); library(gridExtra); library(stringr); library(reshape); library(Hmisc); library(scatterplot3d); library(MASS); library(gbm); library(randomForest)  
+```
+
+### Load Data 
+
+```{r Load Data, warning=FALSE, echo=TRUE}
+  # Clear down everything
+  rm(list=ls())
+  tmpdata <- read.csv2(file='./Data/pml-training.csv', header=TRUE, sep=',', strip.white=TRUE, na.strings='<NA>', stringsAsFactors = FALSE)
+  dim(tmpdata)
+```
+
+As the call to the *dim()* function shows there are a lot of variables to initially consider.
+```{r Display Variables Prep, warning=FALSE, echo=TRUE}
+  defs <- as.data.frame(sapply(tmpdata, class))
+  names(defs)[1] <- 'Type'
+  defs$Name <- rownames(defs)
+  defs <- data.frame(defs$Name, defs$Type)
+  colrows <- as.integer(nrow(defs) / 3)
+  start1<-1; end1<-colrows; start2<-end1+1; end2<-end1+colrows; start3<-end2+1; end3<-nrow(defs)
+```
+<p>
+<div class="column-left">
+```{r Display Variables 1, warning=FALSE, echo=FALSE}
+  defs[start1:end1,]
+```
+</div>
+<div class="column-center">
+```{r Display Variables 2, warning=FALSE, echo=FALSE}
+  defs[start2:end2,]
+```
+</div>
+<div class="column-right">
+```{r Display Variables 3, warning=FALSE, echo=FALSE}
+  defs[start3:end3,]
+```
+</div>
+</p>
+
+## Data Pre-processing
+### Change Data Types
+
+Some variables have been assigned the wrong data type of character so convert them to numeric.
+```{r Change Data Types, warning=FALSE}
+  excluded <- c(1,2,3,4,5,6,7,160)
+  for (i in 1:ncol(tmpdata)) {if(max(i==excluded) == 0) {tmpdata[,i] <- as.numeric(tmpdata[,i])}}
+```
+
+### Remove Summary Data Rows
+
+Remove the summary rows form the main data set as these would distort later prediction models.
+```{r Remove Summary Data Rows, warning=FALSE}
+  summarydata <- subset(tmpdata, new_window=='yes'); tmpdata <- subset(tmpdata, new_window=='no')
+```
+
+### Handle Missing Values
+
+The data set now contains many variables with NA values in every observation that can safely be removed: 
+
+```{r Deal With Missing Values, warning=FALSE}
+  summaryNA <- as.data.frame(summary(is.na(tmpdata)))
+  summaryNA <- subset(summaryNA, grepl("^(?!Mode|NA).*$", Freq, perl = TRUE))
+  summaryNA <- transform(summaryNA, Freq=colsplit(Freq, split=":", names=c('Exists', 'Count')))
+  summaryNA$Exists <- summaryNA$Freq$Exists; 
+  summaryNA$Count <- summaryNA$Freq$Count
+  allNAcols <- subset(summaryNA, summaryNA$Exists==TRUE & summaryNA$Count==nrow(tmpdata))$Var2
+  writeLines(paste('Number of variables all NA = ', as.character(length(allNAcols)), '\n'))
+  tmpdata <- tmpdata[, !(names(tmpdata) %in% allNAcols)]
+  dim(tmpdata)
+```
+
+Removing these variables has significantly reduced the width of the data set from 160 to 60 variables.
+
+### Check Remaining Variables for Near Zero Variance
+
+Remaining variables that have contain variance should be removed as modelling features as they have no impact on the outcome:
+
+```{r Check Remaining Variables for Near Zero Variance, warning=FALSE}
+  nearZeroVarCols <- nearZeroVar(tmpdata, saveMetrics = TRUE)
+  subset(nearZeroVarCols, nearZeroVarCols$zeroVar==TRUE)
+```
+
+Remove zero variance variables:
+```{r Remove Remaining Variables With Near Zero Variance, warning=FALSE}
+  tmpdata <- tmpdata[, !names(tmpdata) %in% row.names(subset(nearZeroVarCols, nearZeroVarCols$zeroVar==TRUE))]
+```
+
+### Remove the Totals Columns
+
+The Totals columns in the data contain subtotals of periods of excercise for each subject. These need to be removed to prevent distortion of modelling predictions i.e. these observations are not of the same type as the data remaining:
+
+```{r Remove the Totals Columns, warning=FALSE}
+  TotalCols <- subset(names(tmpdata), grepl("^total", names(tmpdata), perl = TRUE))
+  tmpdata <- tmpdata[, !(names(tmpdata) %in% TotalCols)]
+```
+
+### Set classe Variable (the outcome) to a Factor Variable
+```{r Set classe Variable to Factor Variable, warning=FALSE}
+  tmpdata$classe <- as.factor(tmpdata$classe)
+  # Re-order so A is last lever (correct approach) so that we can show on-top in plots?
+  levels(tmpdata$classe) <- c('A','B','C','D','E')
+```
+
+### Further Preprocessing
+
+#### Check for Remaining NA Values 
+```{r Further Preprocessing - Check for Remaining NA Values, warning=FALSE}
+  if (max(is.na(tmpdata)) > 0) { tmpdata[is.na(tmpdata)] <- 0 }; max(is.na(tmpdata))
+```
+
+#### Tag Each Row With its Colour According to Classe for Plotting:
+* Class A: Exactly according to the specification = Yellow
+* Class B: Throwing the elbows to the front = Orange
+* Class C: Lifting the dumbbell only halfway = Blue
+* Class D: Lowering the dumbbell only halfway = Green
+* Class E: Throwing the hips to the front = Pink
+
+```{r Further Preprocessing - Add Colour Flag, warning=FALSE}
+  classecols <- c('#F0E442','#E69F00','#56B4E9','#009E73','#CC79A7')
+  tmpdata$pColour[tmpdata$classe=='A'] <- classecols[1]
+  tmpdata$pColour[tmpdata$classe=='B'] <- classecols[2]
+  tmpdata$pColour[tmpdata$classe=='C'] <- classecols[3]
+  tmpdata$pColour[tmpdata$classe=='D'] <- classecols[4]
+  tmpdata$pColour[tmpdata$classe=='E'] <- classecols[5]
+```
+
+## Split Data into Training, Validation and Test Datasets
+
+Large data set so we can divide the data into 60% Training, 20% Validation and 20% Testing
+
+```{r Split Data, warning=FALSE}
+  set.seed(666)
+  # 60% Training 
+  inTrain <- createDataPartition(tmpdata$classe, times=1, p=0.6, list=FALSE)
+  training <- tmpdata[inTrain,]
+  other <- tmpdata[-inTrain,]
+  # 20% Validation and 20% Testing
+  inTest <- createDataPartition(other$classe, times=1, p=0.5, list=FALSE)
+  testing <- other[inTest,]
+  validation <- other[-inTest,]
+  rm(other); rm(inTest)
+```  
+  
+Dividing the data along these % ratios results in the following row & column counts: 
+
+```{r show datasets summary, echo=FALSE}
+rbind('Training'=dim(training),'Testing'=dim(testing),'Validation'=dim(validation))
+```
+
+
+## Exploratory Data Analysis on the Training Set
+<p>
+### 3D Variable Plots 
+#### Accelerometer Positions
+```{r Accelerometer Positions 3D, fig.height=14, fig.width=18, warning=FALSE, dpi=36}
+  par(mfrow=c(2,2))
+  cols <- c('classe', 'pColour', 'accel_belt_x', 'accel_belt_y', 'accel_belt_z')
+  g.accel.belt <- with(training[, cols], scatterplot3d(x=accel_belt_x, y=accel_belt_y, z=accel_belt_z, color=pColour, col.axis = 'blue', col.grid = 'blue', pch=19,main="Belt Acc. Position and Classe Rating",xlab="X", ylab='Y',zlab='Z', cex.symbols = 1.25))
+  
+  cols <- c('classe', 'pColour', 'accel_forearm_x', 'accel_forearm_y', 'accel_forearm_z')
+  g.accel.forearm <- with(training[, cols], scatterplot3d(x=accel_forearm_x, y=accel_forearm_y, z=accel_forearm_z, color=pColour, col.axis = 'blue', col.grid = 'blue', pch=19,main="Forearm Acc. Position and Classe Rating", xlab="X", ylab='Y',zlab='Z', cex.symbols = 1.25 
+                                        )) 
+  cols <- c('classe', 'pColour', 'accel_arm_x', 'accel_arm_y', 'accel_arm_z')
+  g.accel.arm <- with(training[, cols], scatterplot3d(x=accel_arm_x, y=accel_arm_y, z=accel_arm_z, color=pColour, col.axis = 'blue', col.grid = 'blue', pch=19, main="Arm Acc. Position and Classe Rating", xlab="X", ylab='Y',zlab='Z', cex.symbols = 1.25))
+  
+  cols <- c('classe', 'pColour', 'accel_dumbbell_x', 'accel_dumbbell_y', 'accel_dumbbell_z')
+  g.accel.dumbbell <- with(training[, cols], scatterplot3d(x=accel_dumbbell_x, y=accel_dumbbell_y, z=accel_dumbbell_z, color=pColour, col.axis = 'blue', col.grid = 'blue', pch=19, main="Dumbbell Acc. Position and Classe Rating", xlab="X", ylab='Y',zlab='Z', cex.symbols = 1.25))
+```
+
+#### Accelerometer Roll, Pitch & Yaw
+```{r Accelerometer Roll,Pitch and Yaw 3D, warning=FALSE, fig.height=14, fig.width=18, dpi=36}
+  par(mfrow=c(2,2))
+  cols <- c('classe', 'pColour', 'roll_belt', 'pitch_belt', 'yaw_belt')
+  g.rpy.belt <- with(training[, cols], scatterplot3d(x=roll_belt, y=pitch_belt, z=yaw_belt, color=pColour, col.axis = 'blue', col.grid = 'blue', pch=19, main="Belt Roll, Pitch & Yaw and Classe Rating", xlab='Roll', ylab='Pitch',zlab='Yaw', cex.symbols = 1.25)) 
+  
+  cols <- c('classe', 'pColour', 'roll_forearm', 'pitch_forearm', 'yaw_forearm')
+  g.rpy.forearm <- with(training[, cols], scatterplot3d(x=roll_forearm, y=pitch_forearm, z=yaw_forearm, color=pColour, col.axis = 'blue', col.grid = 'blue', pch=19, main="Forearm Roll, Pitch & Yaw and Classe Rating", xlab='Roll', ylab='Pitch',zlab='Yaw', cex.symbols = 1.25))
+  
+  cols <- c('classe', 'pColour', 'roll_arm', 'pitch_arm', 'yaw_arm')
+  g.rpy.arm <- with(training[, cols], scatterplot3d(x=roll_arm, y=pitch_arm, z=yaw_arm, color=pColour,  col.axis = 'blue', col.grid = 'blue', pch=19, main='Arm Roll, Pitch & Yaw and Classe Rating', xlab='Roll', ylab='Pitch',zlab='Yaw', cex.symbols = 1.25)) 
+  
+  cols <- c('classe', 'pColour', 'roll_dumbbell', 'pitch_dumbbell', 'yaw_dumbbell')
+  g.rpy.dumbbell <- with(training[, cols], scatterplot3d(x=roll_dumbbell, y=pitch_dumbbell, z=yaw_dumbbell, color=pColour,  col.axis = 'blue', col.grid = 'blue', pch=15, main="Dumbbell Roll, Pitch & Yaw and Classe Rating", xlab='Roll', ylab='Pitch',zlab='Yaw', cex.symbols = 1.25))
+```
+
+#### Gyroscope Position
+```{r Gyroscope Positions, warning=FALSE, fig.height=14, fig.width=18, dpi=36}
+  par(mfrow=c(2,2))
+  cols <- c('classe', 'pColour', 'gyros_belt_x', 'gyros_belt_y', 'gyros_belt_z')
+  g.gyro.belt <- with(training[, cols], scatterplot3d(x=gyros_belt_x, y=gyros_belt_y, z=gyros_belt_z, color=pColour, col.axis = 'blue', col.grid = 'blue', pch=19, main="Belt Gyroscope Position and Classe Rating", xlab='X', ylab='Y',zlab='Z', cex.symbols = 1.25)) 
+
+  cols <- c('classe', 'pColour', 'gyros_forearm_x', 'gyros_forearm_y', 'gyros_forearm_y')
+  g.gyro.forearm <- with(training[, cols], scatterplot3d(x=gyros_forearm_x, y=gyros_forearm_y, z=gyros_forearm_y, color=pColour, col.axis = 'blue', col.grid = 'blue', pch=19, main="Forearm Gyroscope Position and Classe Rating", xlab='X', ylab='Y',zlab='Z', cex.symbols = 1.25)) 
+  
+  cols <- c('classe', 'pColour', 'gyros_arm_x', 'gyros_arm_y', 'gyros_arm_z')
+  g.gyro.arm <- with(training[, cols], scatterplot3d(x=gyros_arm_x, y=gyros_arm_y, z=gyros_arm_z, color=pColour, col.axis = 'blue', col.grid = 'blue', pch=19, main='Arm Gyroscope Position and Classe Rating', xlab='X', ylab='Y',zlab='Z', cex.symbols = 1.25)) 
+  
+  cols <- c('classe', 'pColour', 'gyros_dumbbell_x', 'gyros_dumbbell_y', 'gyros_dumbbell_z')
+  g.gyro.dumbbell <- with(training[, cols], scatterplot3d(x=gyros_dumbbell_x, y=gyros_dumbbell_y, z=gyros_dumbbell_z, color=pColour, col.axis = 'blue', col.grid = 'blue', pch=19, main="Dumbbell Gyroscope Position and Classe Rating", xlab='X', ylab='Y',zlab='Z', cex.symbols = 1.25)) 
+```
+
+#### Magnet Position
+```{r Magnet Positions, warning=FALSE, fig.height=14, fig.width=18, dpi=36}
+  par(mfrow=c(2,2))
+cols <- c('classe', 'pColour', 'magnet_belt_x', 'magnet_belt_y', 'magnet_belt_z')
+  g.magnet.belt <- with(training[, cols], scatterplot3d(x=magnet_belt_x, y=magnet_belt_y, z=magnet_belt_z, color=pColour, col.axis = 'blue', col.grid = 'blue', pch=19, main="Belt Magnet Position and Classe Rating", xlab='X', ylab='Y',zlab='Z', cex.symbols = 1.25)) 
+  
+  cols <- c('classe', 'pColour', 'magnet_forearm_x', 'magnet_forearm_y', 'magnet_forearm_y')
+  g.magneto.forearm <- with(training[, cols], scatterplot3d(x=magnet_forearm_x, y=magnet_forearm_y, z=magnet_forearm_y, color=pColour, col.axis = 'blue', col.grid = 'blue', pch=19, main="Forearm Magnet Position and Classe Rating", xlab='X', ylab='Y',zlab='Z', cex.symbols = 1.25)) 
+                
+  cols <- c('classe', 'pColour', 'magnet_arm_x', 'magnet_arm_y', 'magnet_arm_z')
+  g.magnet.arm <- with(training[, cols], scatterplot3d(x=magnet_arm_x, y=magnet_arm_y, z=magnet_arm_z, color=pColour, col.axis = 'blue', col.grid = 'blue', pch=19, main='Arm Magnet Position and Classe Rating', xlab='X', ylab='Y',zlab='Z', cex.symbols = 1.25)) 
+  
+  cols <- c('classe', 'pColour', 'magnet_dumbbell_x', 'magnet_dumbbell_y', 'magnet_dumbbell_z')
+  g.magnet.dumbbell <- with(training[, cols], scatterplot3d(x=magnet_dumbbell_x, y=magnet_dumbbell_y, z=magnet_dumbbell_z, color=pColour, col.axis = 'blue', col.grid = 'blue', pch=19, main="Dumbbell Magnet Position and Classe Rating", xlab='X', ylab='Y',zlab='Z', cex.symbols = 1.25))
+```
+
+### Outliers
+
+The 3D scatterplots of the Training data suggest outliers existing in some variables which will be removed in order to reduce the skew in the distribution and prevent distortion in later analysis of Principle Components.
+
+#### Threshold Function
+The function calculates a lower and upper threshold above and below the inter quantile range. The distance of the threshold is set by the parameter *m*. For the purposes of this analysis *m* will be set at 5 which is  very conservative, the reason being I do not understand the domain and only wish to remove what would seem very extreme values in each range of variables.
+
+```{r Outliers Function, warning=FALSE, fig.height=14, fig.width=18}
+    OutlierThresholds <- function(data, multiplier) {
+          m <- multiplier; q <- quantile(data); lowerq <- q[2]; upperq <- q[4]; iqr <- upperq - lowerq
+          lowerthreshhold <- as.numeric(lowerq - (iqr * m)); upperthreshold <- as.numeric((iqr * m) + upperq)
+          c('lowerthreshhold'=lowerthreshhold, 'upperthreshold'=upperthreshold)}
+```
+
+#### Calculate Outlier Thresholds
+Iterate through the variable columns in the Training set and calculate lower and upper cut-off points outside which range outliers would deem to exist:
+
+```{r Calculate Outlier Thresholds, warning=FALSE}
+  exclude <- c(1,2,3,4,5,6,55,56); m <- 5; colnames <- names(training)
+  thresholds <- data.frame(VariableName=character(), Lower=numeric(), Upper=numeric(), stringsAsFactors=FALSE)
+  for (i in 1:ncol(training)) {
+    if(!i %in% exclude) {
+      t <- OutlierThresholds(as.numeric(training[,i]), m)
+      rname <- as.character(i)
+      thresholds[rname,]$VariableName <- colnames[i]; thresholds[rname,]$Lower <- t[1]; thresholds[rname,]$Upper <- t[2]
+    }
+  }
+  colrows <- as.integer(nrow(thresholds) / 3)
+  start1<-1; end1<-colrows; start2<-end1+1; end2<-end1+colrows; start3<-end2+1; end3<-nrow(thresholds)
+```
+
+<p>
+<div class="column-left">
+```{r Display Thresholds 1, warning=FALSE, echo=FALSE}
+  thresholds[start1:end1,]
+```
+</div>
+<div class="column-center">
+```{r Display Thresholds 2, warning=FALSE, echo=FALSE}
+  thresholds[start2:end2,]
+```
+</div>
+<div class="column-right">
+```{r Display Thresholds 3, warning=FALSE, echo=FALSE}
+  thresholds[start3:end3,]
+```
+</div>
+</p>
+
+Identify all rows containing variables whose value lies outside the ranges in dataframe *thresholds*: 
+
+```{r Find All Outliers, warning=FALSE}
+  # Check each variable values outside the below\above the threshold
+  all.outliers <- data.frame(X=numeric(), VariableName=character(), Value=numeric(), Lower=numeric(), Upper=numeric(), stringsAsFactors=FALSE)
+  
+  for (i in 1:ncol(training)) {
+    if(!i %in% exclude) {
+      varname <- colnames[i]
+      lower <- thresholds[thresholds$VariableName==varname,]$Lower; upper <- thresholds[thresholds$VariableName==varname,]$Upper
+      outliers <- training[which( training[,i]<lower | training[,i]>upper), c(1, i)]
+      if (nrow(outliers) > 0){
+        all.outliers <- rbind( all.outliers, 
+                               data.frame(X=outliers[,1], VariableName=rep(varname, nrow(outliers)), Value=outliers[,2], Lower=rep(lower, nrow(outliers)), Upper=rep(upper, nrow(outliers))))
+      }}}
+```
+
+#### Outliers Summary:
+
+```{r Outliers Summary, warning=FALSE}
+  data.frame(table(all.outliers$VariableName))
+```
+
+#### Remove Outliers:
+```{r Remove Outliers, warning=FALSE}
+  writeLines('Training set dimensions before removal of outliers:')
+  dim(training); 
+  training <- training[-all.outliers$X,]; 
+  writeLines('Training set dimensions after:')
+  dim(training)
+```
+
+### Proportion of Each Outcome in Training Dataset
+
+It's useful to see how the actual classe values are distributed in the Training as a quick way to be able to check our later predictions look sensible (assuming original data was normally distributed): 
+
+```{r Proportion of Each Outcome, warning=FALSE}
+  round(prop.table(table(training[,'classe'])), 2)
+```
+
+### Variable Correlation
+
+Analysing correlated variables is useful in understanding the Training data and informs the feature selection decision, therefore helping reduce potential for over-fitting the prediction models:
+
+```{r Calculate Correlation, warning=FALSE}
+  exclude <- c(1,2,3,4,5,6,55,56)
+  cm <- cor(training[,-exclude])
+  # Set correlations on or below off diagonal to 0 so ommitted from output 
+  diag(cm) <- 0; cm[lower.tri(cm)] <- 0
+  df.cm <- as.data.frame(as.table(cm))
+  # Omit the inversely correlated pairing
+  df.cm <- df.cm[!df.cm$Var1==df.cm$Var2,]
+  df.cm$FreqAbs = abs(df.cm$Freq)
+  df.cm.top <- head(df.cm[order(df.cm$FreqAbs, decreasing = TRUE),], 30)
+  colrows <- as.integer(nrow(df.cm.top) / 3)
+  start1<-1; end1<-colrows; start2<-end1+1; end2<-end1+colrows; start3<-end2+1; end3<-nrow(df.cm.top)
+```  
+
+<p>
+<div class="column-left">
+```{r Display Correlation 1, warning=FALSE, echo=FALSE}
+  df.cm.top[start1:end1,]
+```
+</div>
+<div class="column-center">
+```{r Display Correlation 2, warning=FALSE, echo=FALSE}
+  df.cm.top[start2:end2,]
+```
+</div>
+<div class="column-right">
+```{r Display Correlation 3, warning=FALSE, echo=FALSE}
+  df.cm.top[start3:end3,]
+```
+</div>
+</p>
+
+Many of the separate measurements types taken at each sensor are highly correlated e.g. roll, pitch & yaw measurements on the belt highly correlate with accelerator x, z & y positions of the belt. This suggests certain measurements can be ommitted without compromising prediction accuracy. This also helps prevent over-fitting the models too closely to the Training set.
+
+### Principle Component Analysis
+```{r Principle Component Analysis, warning=FALSE}
+  exclude <- c(1,2,3,4,5,6,55,56); pc <- prcomp(training[,-exclude], scale. = TRUE); summary(pc)
+```
+
+  The first 35 Principle Components explain > 99% of the variance in the Training dataset.
+
+## Train Models and Run Predictions Against Validation Dataset
+
+  The Machine Learning problem requires us to predict the outcome of a factor variable so we will use models support Classification type prediction:
+
+```{r Get Model Types, warning=FALSE}
+  getModelInfo()$lda$type  
+  getModelInfo()$rf$type
+  getModelInfo()$gbm$type
+```
+
+### Configure Training Control for Cross Validation
+
+Most prediction modelling is performed using the Caret package (except Boosted Trees) and the Training Control is configured for each model to perform 10 fold Cross Validation. The seeds are also set in the Training Control in order to ensure reproducibility of results each time the code is executed.
+
+The number of tuning parameters (i.e. number of variables) used from the Training dataset will vary. This needs to be considered when setting the number of seed values used. 
+
+The data is pre-processed to be Scaled and Centred, i.e. normalised, as another parameter of the Training Control. This reduces the level of skew that may be present in the distribution if not standard.
+
+We will only going to consider the first 35  Principle Components of the Training set; this explains >99% of the variance in the data, therefore we have 35 Tuning Parameters.
+ 
+```{r Set Seed for Reproducability 1, warning=FALSE}
+  set.seed(666)
+  nParams <- 35 # First 35 Principle Components
+  seeds <- vector(mode = "list", length = 11)
+  for(i in 1:10) seeds[[i]]<- sample.int(n=1000, nParams)
+  seeds[[11]]<-sample.int(1000, 1)
+  tc <- trainControl(method='cv', number=10, allowParallel=TRUE, preProcOptions = c('scale','center'), seeds=seeds)
+```
+  
+Create a data frame to store prediction results from each model. These will be used later for comparison:
+
+```{r Set Create Prediction Results Dataframe, warning=FALSE}
+  df.combined.predictions <- data.frame()
+```
+  
+Training the Random Forest and Boosted Trees models has proved too slow when using the entire Training Set so mutiple cores are configured to reduce overall time by calculating in parallel:
+
+```{r Set Cluster, warning=FALSE}
+  cl <- makeCluster(2); registerDoParallel(cl)
+```
+
+### Models Using Principle Components
+
+Create a dataframe containing the *classe* value in the Training set and first 35 Princple Components (explaining 99% of variance):
+
+```{r Set Training PCA Dataframe, warning=FALSE}
+  training.pca <- data.frame(classe = training$classe, pc$x); training.pca <- training.pca[,1:36]
+```
+
+#### Linear Discriminant Analysis(LDA) Model 
+
+Train the LDA model on the Principal Components of the Training set. Predict *classe* on the Validation set and add the predictions to the summary dataframe:
+
+```{r Transform Validation data to PCA, warning=FALSE}
+  validation.pca <- predict(pc, newdata=validation)
+  validation.pca <- as.data.frame(validation.pca)
+  validation.pca <- validation.pca[,1:36]
+```
+
+```{r PCA LDA CV, warning=FALSE}
+  lda.pca.varfit.cv <- train(classe ~ ., data=training.pca, method='lda', prox=TRUE, trControl=tc)
+  # Predict
+  lda.pca.prediction.cv <- as.data.frame(predict(lda.pca.varfit.cv, validation.pca))
+  names(lda.pca.prediction.cv) <- 'lda.pca.prediction.cv'
+  # Add to combined data frame
+  df.combined.predictions <- data.frame(lda.pca.prediction.cv)
+```  
+
+### Sub-sample of Training Set for Random Forest and Boosted Tree Models
+Training the Random Forest and Boosted Tree models using the full training could not be completed so a sub- sample (approximately 15%) of the Training set is used for these models. However the same sub-sample of training data is always used for comparibility.
+
+```{r Set Small Training Set Sample, warning=FALSE}
+  samplerows <- sample(c(1:nrow(training)), size=as.integer(nrow(training)* 0.15))
+  small.training <- training[samplerows, ]
+```  
+
+```{r Calculate Small Training Set PCA, warning=FALSE}
+  small.pca <- prcomp(small.training[,-exclude], scale. = TRUE)
+  summary(small.pca)
+```
+  
+Note, at the 35th PCA component >99% of the variance in the smaller sub-sample of the Training set is still captured:
+
+```{r Set Small Training PCA Dataframe, warning=FALSE}
+  small.training.pca <- data.frame(classe=small.training$classe, small.pca$x); small.training.pca <- small.training.pca[,1:36]
+```
+
+Again, create a dataframe containing the *classe* value in the Training set and only first 35 Princple Components. As before, transform the validation data into Principle Components although this time based upon the PCA result object from the sub-sample training data:
+
+```{r Transform Validation data to Small PCA, warning=FALSE}
+  validation.pca.small <- predict(small.pca, newdata=validation)
+  validation.pca.small <- as.data.frame(validation.pca.small)
+  validation.pca.small <- validation.pca.small[,1:36]
+```
+  
+#### Random Forest Model on Principle Components
+
+```{r Small PCA RF CV, warning=FALSE, message=FALSE}
+  rf.pca.varfit <- train(classe ~ ., data=small.training.pca, method='rf', prox=FALSE, trainControl=tc)
+  # Predict
+  rf.pca.prediction <- as.data.frame(predict(rf.pca.varfit, validation.pca.small))
+  # Add to combined data frame
+  df.combined.predictions <- data.frame(df.combined.predictions,'rf.pca.prediction'= rf.pca.prediction[,1])
+```
+
+#### Boosted Tree Model on Principle Components
+
+Training the Boosted Tree model on the Principle Components had to be called directly as it would not calculate  correctly via the caret package when using the Training Control to pass the seeds:
+  
+```{r Small PCA BT CV, warning=FALSE, message=FALSE}
+  set.seed(666)
+  bt.pca.varfit <-  gbm(classe ~ ., data=small.training.pca, cv.folds=10, distribution='multinomial')
+  # Predict
+  bt.pca.prediction <- as.data.frame(predict(bt.pca.varfit, validation.pca))
+  names(bt.pca.prediction) <- c('A','B','C','D','E')
+  bt.pca.prediction <- as.data.frame(colnames(bt.pca.prediction)[max.col(bt.pca.prediction,ties.method='first')])
+  # Add to combined data frame
+  df.combined.predictions <- data.frame(df.combined.predictions, 'bt.pca.prediction'= bt.pca.prediction[,1])
+```
+
+### Prediction Models Using Training Data Variables Directly
+
+The same models (LDA, Random Forest and Boosted Tree) will now be used to predict outcomes on the Validation data using each of the four 'types' of measurement available in the Training data, namely:
+
+1. Roll, Pitch & Yaw of the sensors.
+2. Gyroscope Position (X, Y & Z axis measurement)
+3. Accelerometer Position (X, Y & Z axis measurement)
+4. Magnet Position (X, Y & Z axis measurement)
+
+The main reason for experimenting on each of these 'types' of measurement separately is the high levels of correlation that exist between these types as shown in the earlier *Variable Correlation* section above.
+
+Firstly define which variable names belong to each measurement type:
+
+```{r Set Variable Vectors, warning=FALSE}
+  v.rpy.arm = c("roll_arm","pitch_arm","yaw_arm")
+  v.rpy.forearm = c("roll_forearm","pitch_forearm","yaw_forearm")
+  v.rpy.belt = c("roll_belt","pitch_belt","yaw_belt")
+  v.rpy.dumbbell = c("roll_dumbbell","pitch_dumbbell","yaw_dumbbell")
+  v.rpy.all <- c(v.rpy.arm, v.rpy.forearm, v.rpy.belt, v.rpy.dumbbell)
+  
+  v.gyro.arm = c("gyros_arm_x","gyros_arm_y","gyros_arm_z")
+  v.gyro.forearm = c("gyros_forearm_x","gyros_forearm_y","gyros_forearm_z")
+  v.gyro.belt = c("gyros_belt_x","gyros_belt_y","gyros_belt_z")
+  v.gyro.dumbbell = c("gyros_dumbbell_x","gyros_dumbbell_y","gyros_dumbbell_z")
+  v.gyro.all = c(v.gyro.arm, v.gyro.forearm, v.gyro.belt, v.gyro.dumbbell)
+  
+  v.accel.arm = c("accel_arm_x","accel_arm_y","accel_arm_z")
+  v.accel.forearm = c("accel_forearm_x","accel_forearm_y","accel_forearm_z")
+  v.accel.belt = c("accel_belt_x","accel_belt_y","accel_belt_z")
+  v.accel.dumbbell = c("accel_dumbbell_x","accel_dumbbell_y","accel_dumbbell_z")
+  v.accel.all <- c(v.accel.arm, v.accel.forearm, v.accel.belt, v.accel.dumbbell)
+  
+  v.magnet.arm = c("magnet_arm_x","magnet_arm_y","magnet_arm_z")
+  v.magnet.forearm = c("magnet_forearm_x","magnet_forearm_y","magnet_forearm_z")
+  v.magnet.belt = c("magnet_belt_x","magnet_belt_y","magnet_belt_z")
+  v.magnet.dumbbell = c("magnet_dumbbell_x","magnet_dumbbell_y","magnet_dumbbell_z")
+  v.magnet.all <- c(v.magnet.arm, v.magnet.forearm, v.magnet.belt, v.magnet.dumbbell)
+```
+
+### Re-Configure the Training Control for Cross Validation
+The number of tuning parameters now used from the Training dataset is now 12.
+
+```{r Set Seed for Reproducability 2, warning=FALSE}
+  set.seed(666)
+  nParams <- 12 # e.g. length(v.rpy.all)
+  seeds <- vector(mode = "list", length = 11)
+  for(i in 1:10) seeds[[i]]<- sample.int(n=1000, nParams)
+  seeds[[11]]<-sample.int(1000, 1)
+  tc <- trainControl(method='cv', number=10, allowParallel=TRUE, preProcOptions = c('scale','center'), seeds=seeds)
+```
+
+#### Roll, Pitch & Yaw LDA Model
+
+```{r RPY LDA, warning=FALSE}
+  lda.varfit.v.rpy.all <- train(classe ~ ., data=training[, c('classe',v.rpy.all)], method='lda', trControl=tc)
+  # Predict   
+  lda.v.rpy.all.prediction.cv <- as.data.frame(predict(lda.varfit.v.rpy.all, newdata=validation))
+  # Add to combined data frame
+  df.combined.predictions <- data.frame(df.combined.predictions, 'lda.v.rpy.all.prediction.cv' = lda.v.rpy.all.prediction.cv[,1])
+```
+
+#### Gyro LDA Model
+```{r GYRO LDA, warning=FALSE}
+  lda.varfit.v.gyro.all <- train(classe ~ ., data=training[, c('classe',v.gyro.all)], method='lda',trControl=tc)
+  # Predict
+  lda.v.gyro.all.prediction.cv <- as.data.frame(predict(lda.varfit.v.gyro.all, newdata=validation))
+  # Add to combined data frame
+  df.combined.predictions <- data.frame(df.combined.predictions,'lda.v.gyro.all.prediction.cv'=lda.v.gyro.all.prediction.cv[,1])
+```
+
+#### Accelerator LDA Model
+```{r Accelerator LDA, warning=FALSE}
+  lda.varfit.v.accel.all <- train(classe ~ .,data=training[, c('classe',v.accel.all)],method='lda',trControl=tc)
+  # Predict
+  lda.v.accel.all.prediction.cv <- as.data.frame(predict(lda.varfit.v.accel.all, newdata=validation))
+  # Add to combined data frame
+  df.combined.predictions <- data.frame(df.combined.predictions,'lda.v.accel.all.prediction.cv'=lda.v.accel.all.prediction.cv[,1])
+```
+
+#### Magnet LDA Model
+```{r Magnet LDA, warning=FALSE}
+  lda.varfit.v.magnet.all <- train(classe ~ .,data=training[, c('classe',v.magnet.all)],method='lda',trControl=tc)
+  # Predict
+  lda.v.magnet.all.prediction.cv <- as.data.frame(predict(lda.varfit.v.magnet.all, newdata=validation))
+  # Add to combined data frame
+  df.combined.predictions <- data.frame(df.combined.predictions,'lda.v.magnet.all.prediction.cv'=lda.v.magnet.all.prediction.cv[,1])
+```
+
+#### Roll, Pitch & Yaw Random Forest Model
+```{r RPY RF, warning=FALSE, message=FALSE}
+  rf.v.rpy.all.varfit <- train(classe ~ .,data=small.training[,c('classe',v.rpy.all)],method='rf',prox=FALSE,trainControl=tc)
+  # Predict
+  rf.v.rpy.all.prediction.cv <- as.data.frame(predict(rf.v.rpy.all.varfit, newdata=validation))
+  # Add to combined data frame
+  df.combined.predictions <- data.frame(df.combined.predictions,'rf.v.rpy.all.prediction.cv'=rf.v.rpy.all.prediction.cv[,1])
+```
+
+#### Gyro Random Forest Model
+```{r Gyro RF, warning=FALSE, message=FALSE}
+  rf.v.gyro.all.varfit <- train(classe ~ .,data=small.training[, c('classe', v.gyro.all)], method='rf', prox=FALSE,trainControl=tc)
+  # Predict
+  rf.v.gyro.all.prediction.cv <- as.data.frame(predict(rf.v.gyro.all.varfit, newdata=validation))
+  # Add to combined data frame
+  df.combined.predictions <- data.frame(df.combined.predictions,'rf.v.gyro.all.prediction.cv'=rf.v.gyro.all.prediction.cv[,1])
+```
+
+#### Accelerator Random Forest Model
+```{r Accelerator RF, warning=FALSE, message=FALSE}
+  rf.v.accel.all.varfit <- train(classe ~ .,data=small.training[, c('classe', v.accel.all)],method='rf', prox=FALSE,trainControl=tc)
+  # Predict
+  rf.v.accel.all.prediction.cv <- as.data.frame(predict(rf.v.accel.all.varfit, newdata=validation))
+  # Add to combined data frame
+  df.combined.predictions <- data.frame(df.combined.predictions,'rf.v.accel.all.prediction.cv'=rf.v.accel.all.prediction.cv[,1])
+```
+
+#### Magnet Random Forest Model
+```{r Magnet RF, warning=FALSE, message=FALSE}
+ rf.v.magnet.all.varfit <- train(classe ~ .,data=small.training[,c('classe',v.magnet.all)],method='rf',prox=FALSE,trainControl=tc)
+  # Predict
+  rf.v.magnet.all.prediction.cv <- as.data.frame(predict(rf.v.magnet.all.varfit, newdata=validation))
+  # Add to combined data frame
+  df.combined.predictions <- data.frame(df.combined.predictions,'rf.v.magnet.all.prediction.cv'=rf.v.magnet.all.prediction.cv[,1])
+```
+
+#### RPY Boosted Tree
+```{r RPY Boosted Tree, warning=FALSE, message=FALSE}
+  set.seed(666)
+  bt.v.rpy.all.varfit <-  gbm(classe ~ ., data=small.training[,c('classe',v.rpy.all)], cv.folds=10,  distribution='multinomial',interaction.depth = 3,n.trees = 150,shrinkage = 0.1,n.minobsinnode = 10)
+  # Predict
+  bt.v.rpy.all.prediction.cv <- as.data.frame(predict(bt.v.rpy.all.varfit, newdata=validation))
+  names(bt.v.rpy.all.prediction.cv) <- c('A','B','C','D','E')
+  bt.v.rpy.all.prediction.cv <- as.data.frame(colnames(bt.v.rpy.all.prediction.cv)[max.col(bt.v.rpy.all.prediction.cv, ties.method='first')])
+  # Add to combined data frame
+  df.combined.predictions <- data.frame(df.combined.predictions,'bt.v.rpy.all.prediction.cv'=bt.v.rpy.all.prediction.cv[,1])
+```
+  
+#### Gyro Boosted Tree
+```{r Gyro Boosted Tree, warning=FALSE, message=FALSE}
+  set.seed(666)
+  bt.v.gyro.all.varfit <-  gbm(classe ~ ., data=small.training[,c('classe',v.gyro.all)], cv.folds=10, distribution='multinomial',interaction.depth = 3,n.trees = 150,shrinkage = 0.1,n.minobsinnode = 10)
+  # Predict
+  bt.v.gyro.all.prediction.cv <- as.data.frame(predict(bt.v.gyro.all.varfit, newdata=validation))
+  names(bt.v.gyro.all.prediction.cv) <- c('A','B','C','D','E')
+  bt.v.gyro.all.prediction.cv <- as.data.frame(colnames(bt.v.gyro.all.prediction.cv)[max.col(bt.v.gyro.all.prediction.cv, ties.method='first')])
+  # Add to combined data frame
+  df.combined.predictions <- data.frame(df.combined.predictions,'bt.v.gyro.all.prediction.cv'=bt.v.gyro.all.prediction.cv[,1])
+```
+  
+#### Accelerator Boosted Tree
+```{r Accelerator Boosted Tree, warning=FALSE, message=FALSE}
+  set.seed(666)
+  bt.v.accel.all.varfit <-  gbm(classe ~ ., data=small.training[,c('classe',v.accel.all)], cv.folds=10, distribution='multinomial',interaction.depth = 3,n.trees = 150,shrinkage = 0.1,n.minobsinnode = 10)
+  # Predict
+  bt.v.accel.all.prediction.cv <- as.data.frame(predict(bt.v.accel.all.varfit, newdata=validation))
+  names(bt.v.accel.all.prediction.cv) <- c('A','B','C','D','E')
+  bt.v.accel.all.prediction.cv <- as.data.frame(colnames(bt.v.accel.all.prediction.cv)[max.col(bt.v.accel.all.prediction.cv, ties.method='first')])
+  # Add to combined data frame
+  df.combined.predictions <- data.frame(df.combined.predictions,'bt.v.accel.all.prediction.cv'=bt.v.accel.all.prediction.cv[,1])
+```
+
+#### Magnet Boosted Tree
+```{r Magnet Boosted Tree, warning=FALSE, message=FALSE}
+  set.seed(666)
+  bt.v.magnet.all.varfit <-  gbm(classe ~ ., data=small.training[,c('classe', v.magnet.all)], cv.folds=10, distribution='multinomial',interaction.depth = 3,n.trees = 150,shrinkage = 0.1,n.minobsinnode = 10)
+  # Predict
+  bt.v.magnet.all.prediction.cv <- as.data.frame(predict(bt.v.magnet.all.varfit, newdata=validation))
+names(bt.v.magnet.all.prediction.cv) <- c('A','B','C','D','E')
+  bt.v.magnet.all.prediction.cv <- as.data.frame(colnames(bt.v.magnet.all.prediction.cv)[max.col(bt.v.magnet.all.prediction.cv, ties.method='first')])
+  # Add to combined data frame
+  df.combined.predictions <- data.frame(df.combined.predictions,'bt.v.magnet.all.prediction.cv'=bt.v.magnet.all.prediction.cv[,1])
+```
+
+### Prediction Results
+
+```{r Show Prediciton Results, warning=FALSE}
+  df.combined.predictions <- data.frame(df.combined.predictions, 'classe'=validation$classe)
+  df.results <- data.frame(stringsAsFactors = FALSE)
+  for (i in 1 : (ncol(df.combined.predictions) - 1)) {
+        col_name <- paste0(names(df.combined.predictions)[i],'.match')
+        # Compare current column of predictions against actual classe value
+        df.compare <- df.combined.predictions[,i] == df.combined.predictions[,ncol(df.combined.predictions)]
+        # Add new column of comparisons
+        if (nrow(df.results) == 0){df.results <- as.data.frame(df.compare)} else 
+                                  {df.results <- as.data.frame(cbind(df.results,as.data.frame(df.compare)))}
+        names(df.results)[i] = col_name}
+  df.accuracy <- data.frame(Prediction=character(), Accuracy=numeric(), stringsAsFactors=FALSE)
+  for (i in 1 : (ncol(df.results))) {
+          col_name <- str_replace(names(df.results)[i],'.match','.accuracy')
+          # Calculate accuracy of prediction against actual classe
+          accuracy <- sum((df.results[,i]==TRUE) * 1) / nrow(df.results)
+          df.accuracy[i,]$Prediction <- col_name; df.accuracy[i,]$Accuracy <- round(accuracy, 3)
+          rownames(df.accuracy)[i] <- col_name}
+  # Order by descending Accuracy
+  df.accuracy <- df.accuracy[order(df.accuracy$Accuracy, decreasing=TRUE), 1:2]
+  colrows <- as.integer(ceiling(nrow(df.accuracy) / 3))
+  start1<-1; end1<-colrows; start2<-end1+1; end2<-end1+colrows; start3<-end2+1; end3<-nrow(df.accuracy)
+```
+
+#### Accuracy and Confusion Matrix Results
+<p>
+<div class="column-left">
+```{r Show Predictions 1, warning=FALSE, echo=FALSE}
+for (i in start1 : end1) {cname <- str_replace(df.accuracy[i,]$Prediction,'.accuracy','')
+    writeLines(paste('Prediction: ', cname)); writeLines(paste('Accuracy: ', df.accuracy[i,]$Accuracy))
+    res <- confusionMatrix(df.combined.predictions[,names(df.combined.predictions)==cname],df.combined.predictions$classe); writeLines(''); print(res$table); writeLines('')}
+```
+</div>
+<div class="column-center">
+```{r Show Predictions 2, warning=FALSE, echo=FALSE}
+for (i in start2 : end2) {cname <- str_replace(df.accuracy[i,]$Prediction,'.accuracy','')
+    writeLines(paste('Prediction: ', cname)); writeLines(paste('Accuracy: ', df.accuracy[i,]$Accuracy))
+    res <- confusionMatrix(df.combined.predictions[,names(df.combined.predictions)==cname],df.combined.predictions$classe); writeLines(''); print(res$table); writeLines('')}
+```
+</div>
+<div class="column-right">
+```{r Show Predictions 3, warning=FALSE, echo=FALSE}
+for (i in start3 : end3) {cname <- str_replace(df.accuracy[i,]$Prediction,'.accuracy','')
+    writeLines(paste('Prediction: ', cname)); writeLines(paste('Accuracy: ', df.accuracy[i,]$Accuracy))
+    res <- confusionMatrix(df.combined.predictions[,names(df.combined.predictions)==cname],df.combined.predictions$classe); writeLines(''); print(res$table); writeLines('')}
+```
+</div>
+</p>
+
+The most accurate prediction is provided by the Random Forest model with 90% accuracy followed by the Boosted Tree with 85% accuracy and in both cases using the Roll, Pitch & Yaw measurements.
+
+Random Forest also is the most accurate when using Principle Components to predict although this only produces the 4th most accurate results.
+
+LDA model perfomance is a lot poorer, only being 9th most accuarate at 60% using Principle Components.
+
+### Predicting on Combination of Variables from Different Sensor Types 
+
+The predictions showed that the highest accuracy using: 
+Random Forest:  Roll, Pitch & Yaw variables | Magnet
+Boosted Tree:   Roll, Pitch & Yaw variables | Magnet
+LDA:            Magnet |  Accelarator
+
+Combine the top 2 sets of measurements for each model to see what improvements this makes to the predictions:
+
+#### Re-Configure Configure the Training Control for Cross Validation
+The number of tuning parameters now used from the Training dataset is now 24.
+
+```{r Set Seed for Reproducability 3, warning=FALSE}
+  set.seed(666)
+  nParams <- 24 # e.g. length(v.rpy.all)
+  seeds <- vector(mode = "list", length = 11)
+  for(i in 1:10) seeds[[i]]<- sample.int(n=1000, nParams)
+  seeds[[11]]<-sample.int(1000, 1)
+  tc <- trainControl(method='cv', number=10, allowParallel=TRUE, preProcOptions = c('scale','center'), seeds=seeds)
+```
+
+```{r Set Prediction Results Dataframe 2, warning=FALSE}
+  df.combined.predictions.2 <- data.frame()
+```
+
+#### Magnet and Accelerator LDA Model
+```{r Magnet and Accelerator LDA, warning=FALSE}
+  lda.varfit.v.magnet.accel.all <- train(classe ~ .,data=training[,c('classe',v.magnet.all,v.accel.all)], method='lda',trControl=tc)
+  # Predict
+  lda.v.magnet.accel.all.prediction.cv <- as.data.frame(predict(lda.varfit.v.magnet.accel.all, newdata=validation))
+  # Add to combined data frame
+  df.combined.predictions.2 <- data.frame('lda.v.magnet.accel.all.prediction.cv'=lda.v.magnet.accel.all.prediction.cv[,1])
+```
+
+#### RPY and Magnet Random Forest Model
+```{r RPY and Magnet RF, warning=FALSE, message=FALSE}
+  rf.v.rpy.magnet.all.varfit <- train(classe ~ .,data=small.training[,c('classe',v.rpy.all,v.magnet.all)], method='rf',prox=FALSE,trainControl=tc)
+  # Predict
+  rf.v.rpy.magnet.all.prediction.cv <- as.data.frame(predict(rf.v.rpy.magnet.all.varfit,newdata=validation))
+  # Add to combined data frame
+  df.combined.predictions.2 <- data.frame(df.combined.predictions.2, 'rf.v.rpy.magnet.all.prediction.cv'= rf.v.rpy.magnet.all.prediction.cv[,1])
+```
+
+#### RPY and Magnet Boosted Tree 
+```{r RPY and Magnet Boosted Tree, warning=FALSE, message=FALSE}
+  set.seed(666)
+  bt.v.rpy.magnet.all.varfit <- gbm(classe ~ ., data=small.training[,c('classe',v.rpy.all,v.magnet.all)], cv.folds=10, distribution='multinomial',interaction.depth = 3,n.trees = 150,shrinkage = 0.1,n.minobsinnode = 10)
+  # Predict
+  bt.v.rpy.magnet.all.prediction.cv <- as.data.frame(predict(bt.v.rpy.magnet.all.varfit, newdata=validation))
+  names(bt.v.rpy.magnet.all.prediction.cv) <- c('A','B','C','D','E')
+  bt.v.rpy.magnet.all.prediction.cv <- as.data.frame(colnames(bt.v.rpy.magnet.all.prediction.cv)[max.col(bt.v.rpy.magnet.all.prediction.cv, ties.method='first')])
+  # Add to combined data frame
+  df.combined.predictions.2 <- data.frame(df.combined.predictions.2,'bt.v.rpy.magnet.all.prediction.cv'= bt.v.rpy.magnet.all.prediction.cv[,1])
+```
+
+## Prediction Results of Combined Variable Sets
+
+```{r Show Prediciton Results 2, warning=FALSE}
+  df.combined.predictions.2 <- data.frame(df.combined.predictions.2, 'classe'=validation$classe)
+  df.results <- data.frame(stringsAsFactors = FALSE)
+  for (i in 1 : (ncol(df.combined.predictions.2) - 1)) {
+        col_name <- paste0(names(df.combined.predictions.2)[i],'.match')
+        # Compare current column of predictions against actual classe value
+        df.compare <- df.combined.predictions.2[,i] == df.combined.predictions.2[,ncol(df.combined.predictions.2)]
+        # Add new column of comparisons
+        if (nrow(df.results) == 0){df.results <- as.data.frame(df.compare)} else
+                                  {df.results <- as.data.frame(cbind(df.results,as.data.frame(df.compare)))}
+        names(df.results)[i] = col_name}
+  df.accuracy <- data.frame(Prediction=character(), Accuracy=numeric(), stringsAsFactors=FALSE)
+  for (i in 1 : (ncol(df.results))) {
+          col_name <- str_replace(names(df.results)[i],'.match','.accuracy')
+          # Calculate accuracy of prediction against actual classe
+          accuracy <- sum((df.results[,i]==TRUE) * 1) / nrow(df.results)
+          df.accuracy[i,]$Prediction <- col_name; df.accuracy[i,]$Accuracy <- round(accuracy, 3)
+          rownames(df.accuracy)[i] <- col_name}
+  # Order by descending Accuracy
+  df.accuracy <- df.accuracy[order(df.accuracy$Accuracy, decreasing=TRUE), 1:2]
+  colrows <- as.integer(ceiling(nrow(df.accuracy) / 3))
+  start1<-1; end1<-colrows; start2<-end1+1; end2<-end1+colrows; start3<-end2+1; end3<-nrow(df.accuracy)
+```
+
+### Accuracy and Confusion Matrix Results of Combined Variable Sets
+<p>
+<div class="column-left">
+```{r Show Predictions 4, warning=FALSE, echo=FALSE}
+for (i in start1 : end1) {cname <- str_replace(df.accuracy[i,]$Prediction,'.accuracy','')
+    writeLines(paste('Prediction: ', cname)); writeLines(paste('Accuracy: ', df.accuracy[i,]$Accuracy))
+    res <- confusionMatrix(df.combined.predictions.2[,names(df.combined.predictions.2)==cname],df.combined.predictions.2$classe); writeLines(''); print(res$table); writeLines('')}
+```
+</div>
+<div class="column-center">
+```{r Show Predictions 5, warning=FALSE, echo=FALSE}
+for (i in start2 : end2) {cname <- str_replace(df.accuracy[i,]$Prediction,'.accuracy','')
+    writeLines(paste('Prediction: ', cname)); writeLines(paste('Accuracy: ', df.accuracy[i,]$Accuracy))
+    res <- confusionMatrix(df.combined.predictions.2[,names(df.combined.predictions.2)==cname],df.combined.predictions.2$classe); writeLines(''); print(res$table); writeLines('')}
+```
+</div>
+<div class="column-right">
+```{r Show Predictions 6, warning=FALSE, echo=FALSE}
+for (i in start3 : end3) {cname <- str_replace(df.accuracy[i,]$Prediction,'.accuracy','')
+    writeLines(paste('Prediction: ', cname)); writeLines(paste('Accuracy: ', df.accuracy[i,]$Accuracy))
+    res <- confusionMatrix(df.combined.predictions.2[,names(df.combined.predictions.2)==cname],df.combined.predictions.2$classe); writeLines(''); print(res$table); writeLines('')}
+```
+</div>
+</p>
+
+### Summary of Prediction Accuracy on the Validation Set
+
+The most accurate prediction given overall on the Validation dataset is from the Random Forest model using a combination of the Role, Pitch & Yaw and Magnet measurements from all the sensors.
+
+## Running Best Prediction Model on the Testing Set
+
+Apply the best model and set of features trained on the Training set (i.e. Random Forest using all roll, pitch & yaw and magnet x, y & z measurements) on the Testing set and confirm similar prediction results are given:
+
+### RPY and Magnet Random Forest Model on the Testing Set
+
+```{r RPY and Magnet RF Testing, warning=FALSE, message=FALSE}
+  # Predict
+  rf.v.rpy.magnet.all.prediction.cv.test <- as.data.frame(predict(rf.v.rpy.magnet.all.varfit,newdata=testing))
+  # Add to combined data frame
+  df.prediction.test <- data.frame('prediction'= rf.v.rpy.magnet.all.prediction.cv.test[,1])
+```
+
+### Estimated Out of Sample Error Rate and Confusion Matrix on the Testing Set
+
+```{r Show Predictions Test, warning=FALSE, echo=FALSE}
+  df.prediction.test <- data.frame(df.prediction.test, 'classe'=testing$classe)
+  accuracy <- sum((df.prediction.test$prediction==df.prediction.test$classe) * 1) / nrow(df.prediction.test)
+  writeLines(paste('Estimated Out of Sample Error Rate: ', round(100*accuracy, 2), "%"))
+  res <- confusionMatrix(df.prediction.test$prediction, reference = df.prediction.test$classe); 
+  writeLines(''); print(res$table); writeLines('')
+```
+
+### Stop the cluster
+```{r Stop Cluster, warning=FALSE, message=FALSE}
+  stopCluster(cl)
+```
