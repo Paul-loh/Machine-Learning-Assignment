@@ -905,7 +905,7 @@ Apply the best model and set of features trained on the Training set (i.e. Rando
 ```{r Show Predictions Test, warning=FALSE, echo=FALSE}
   df.prediction.test <- data.frame(df.prediction.test, 'classe'=testing$classe)
   accuracy <- sum((df.prediction.test$prediction==df.prediction.test$classe) * 1) / nrow(df.prediction.test)
-  writeLines(paste('Estimated Out of Sample Error Rate: ', round(100*accuracy, 2), "%"))
+  writeLines(paste('Estimated Out of Sample Error Rate: ', round(100*(1-accuracy), 2), "%"))
   res <- confusionMatrix(df.prediction.test$prediction, reference = df.prediction.test$classe); 
   writeLines(''); print(res$table); writeLines('')
 ```
